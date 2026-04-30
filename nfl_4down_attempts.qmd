@@ -1,0 +1,361 @@
+---
+title: "The Dan Capbell Effect: Fourth-Down Decision-Making in the National Football League"
+format:
+  html:
+    theme: darkly
+    embed-resources: true
+editor: visual
+---
+
+**Jacob Norman\
+2026-05-01**
+
+> **Note:** This is my final project *ST 540: Applied Bayesian Analysis*.
+
+## Summary
+
+The purpose of this analysis is to determine the impact of Detroit Lions head coach Dan Campbell on fourth-down decision-making in the **N**ational **F**ootball **L**eague (NFL). In this document, we will specifically investigate the factors that increase a team's likelihood to attempt a fourth down conversion.
+
+To start, let's import the required libraries. As always, the `tidyverse` load a host of tidy packages that are super helpful for data processing, such as `dplyr` and `ggplot2`. The `nflfastR` package will be utilized to pull in the data from `nflverse`, while `nflplotR` will add team logos and coloring to our figures.
+
+The primary Bayesian modeling package used in this analysis is `brms`, which is based on STAN. This is a similar language to JAGS, but often runs faster. The `brms` package allows us to easily fit **G**eneralized **L**inear **M**ixed **M**odels (GLMMs) without writing STAN code, which is syntatically more difficult to understand than JAGS. This is a huge plus.
+
+```{r}
+#install.packages(c("tidyverse", "brms", "nflfastR", "nflplotR"))
+library(tidyverse)
+library(brms)
+library(nflfastR)
+library(nflplotR)
+```
+
+## Data Processing
+
+Now let's use `nflfastR` to pull in the last 25 seasons of data. No filtering of rows or columns is allowed within this API call. This means that every play will be pulled in, including regular season and playoffs. Here are some filters we will need to apply:
+
+-   Regular season only
+-   Fourth downs only
+-   Completed plays only
+-   Columns of interest only
+
+Let's go read in the data as a `tibble` filter the rows based on the above logic.
+
+```{r}
+# array of last 25 seasons
+years <- 2001:2025
+
+# load nfl play-by-play data
+options(nflreadr.verbose = FALSE)
+pbp <- as_tibble(load_pbp(years))
+
+# create tibble of original dims
+dim_df <- as_tibble_row(
+  set_names(dim(pbp), c('rows', 'cols'))
+  )
+
+# determine cols of interest
+cols <- c("yardline_100", "half_seconds_remaining", 
+          "game_seconds_remaining", "qtr","ydstogo", 
+          "temp", "wind", "score_differential", "season", 
+          "spread_line", "goal_to_go", "home_team", 
+          "rush_attempt", "pass_attempt", "shotgun", 
+          "no_huddle", "fourth_down_attempted", 
+          "fourth_down_converted", "posteam", "season_str")
+
+# clean pbp tibble
+pbp <- pbp |>
+  # filter for completed fourth downs
+  filter(season_type == "REG",
+         down == 4,
+         play_type != "no_play",
+         aborted_play == 0,
+         play_deleted == 0) |>
+  # light feature engineering
+  mutate(fourth_down_attempted = play,
+         home_team = ifelse(posteam_type == "home", 1, 0),
+         wind = replace_na(wind, 0),  # if indoors, default to 0 wind
+         temp = replace_na(temp, 70), # if indoors, default to 70 degrees
+         season_str = as.character(season),
+         across(where(is.character), trimws),) |>
+  # select cols of interest
+  select(cols)
+
+# append new dims to tibble
+dim_df <- dim_df |> rbind(dim(pbp))
+dim_df
+```
+
+We see that we have considerably reduced the number of rows and columns from the original play-by-play data set. Keep in mind that a few of these variables are strings, such as `posteam`, and have dozens of different possible values. Depending on how the models are built, there could be even more predictors than we had originally.
+
+Finally, let's create a higher level `tibble` that groups
+
+the fourth down data by `season` and `team`.
+
+```{r}
+# get summary tibble by season and team
+season_stats <- pbp |>
+  group_by(season, posteam) |>
+  summarize(total_plays = n(),
+            fourth_down_attempts = sum(fourth_down_attempted),
+            .groups = "drop") |>
+  mutate(attempt_prop = fourth_down_attempts / total_plays,
+         detroit = ifelse(posteam == "DET", posteam, "NFL"))
+```
+
+## Exploratory Data Analysis
+
+Before getting into modeling, let's explore that data to see if there are any insights that can be gained. This includes predictions for what the statistical analysis might tell us. To start, let's plot the number of fourth-down attempts by NFL season.
+
+```{r}
+# grouped season tibble
+season_stats |>
+  group_by(season) |>
+  summarize(fourth_down_attempts = sum(fourth_down_attempts)) |>
+# line plot of conversion proportion over time
+ggplot(aes(x = season, y = fourth_down_attempts)) +
+  geom_line(alpha = 0.5) +
+  geom_nfl_logos(aes(team_abbr = "NFL"), width = 0.03) +
+  scale_color_nfl() +
+  labs(title = "Conversion Attempts by NFL Season", 
+       x = "Season", y = "Attempts")
+```
+
+Prior to 2011, the conversion number of attempts were all over the place. From 2011 to 2021, there was an explosion in fourth-down attempts to the point that it looks almost exponential in growth. After that, the attempts seem to level off before increasing again in 2025. Of course, Dan Campbell debuted in 2021, but something else important happened: the NFL regular season expanded from 16 to 17 games. It is possible that the additional game creates more opportunities for fourth-down conversion attempts.
+
+Let's instead look at the number of conversion attempts by the number of fourth down plays.
+
+```{r}
+# grouped season tibble
+season_stats |>
+  group_by(season) |>
+  summarize(attempt_prop = sum(fourth_down_attempts) / sum(total_plays)) |>
+# line plot of conversion proportion over time
+ggplot(aes(x = season, y = attempt_prop)) +
+  geom_line(alpha = 0.5) +
+  geom_nfl_logos(aes(team_abbr = "NFL"), width = 0.03) +
+  scale_color_nfl() +
+  labs(title = "Proportion of Conversion Attempts by NFL Season", 
+       x = "Season", y = "Proportion")
+```
+
+This looks almost identical to the count-based plot, so it is safe to say that the extra game is not noticeably skewing the last 5 years of data. Now let's split out the Detroit Lions from the rest of the league and see if there is distinct visual difference.
+
+```{r}
+# grouped season and team tibble
+season_stats |>
+  group_by(season, detroit) |>
+  summarize(attempt_prop = sum(fourth_down_attempts) / sum(total_plays)
+            , .groups = "drop") |>
+# line plot of conversion proportion over time
+ggplot(aes(x = season, y = attempt_prop)) +
+  geom_line(aes(color=detroit), alpha = 0.5) +
+  geom_nfl_logos(aes(team_abbr = detroit), width = 0.03) +
+  scale_color_nfl() +
+  labs(title = "Proportion of Conversion Attempts by NFL Season", 
+       x = "Season", y = "Proportion", color = "")
+```
+
+Wow, the Lions experienced a significant jump starting in 2021 when Dan Campbell took over the helm. From 2021 through 2024, the proportion of fourth-down conversion attempts stayed fairly consistent, before dropping in 2025. This is the opposite trend that is observed with the rest of the league.
+
+Let's now look at overall attempt proportion by team.
+
+```{r}
+# grouped season and team tibble
+season_stats |>
+  group_by(posteam) |>
+  summarize(attempt_prop = sum(fourth_down_attempts) / sum(total_plays)
+            , .groups = "drop") |>
+# line plot of conversion proportion over time
+ggplot(aes(x = reorder(posteam, attempt_prop, 
+                       decreasing = TRUE), 
+           y = attempt_prop, fill=posteam)) +
+  geom_col() +
+  scale_fill_nfl(alpha = 0.8) +
+  theme(axis.text.x.bottom = element_nfl_logo(size = 1)) +
+    labs(title = "Proportion of Conversion Attempts by Team", 
+         subtitle = "Regular Seasons 2001 - 2025", x = "", y = "Proportion")
+```
+
+Since 2001, the Lions have the second-highest proportion of fourth downs that are attempted as a conversion. even before Dan Campbell, they tended to take risks on fourth down. How does this change if we exclude the pre-Campbell era?
+
+```{r}
+# grouped season and team tibble
+season_stats |>
+  filter(season > 2020) |>
+  group_by(posteam) |>
+  summarize(attempt_prop = sum(fourth_down_attempts) / sum(total_plays)
+            , .groups = "drop") |>
+# line plot of conversion proportion over time
+ggplot(aes(x = reorder(posteam, attempt_prop, 
+                       decreasing = TRUE), 
+           y = attempt_prop, fill=posteam)) +
+  geom_col() +
+  scale_fill_nfl(alpha = 0.8) +
+  theme(axis.text.x.bottom = element_nfl_logo(size = 1)) +
+    labs(title = "Proportion of Conversion Attempts by Team", 
+         subtitle = "Regular Seasons 2021 - 2025", x = "", y = "Proportion")
+```
+
+The Lions have by far the highest proportion of fourth down conversion attempts once Campbell took over head coaching duties.
+
+## Season Model
+
+Now, we will begin the Bayesian modeling. Let's start by determining the impact Dan Campbell has had on conversion attempts. Before going further, let's create a new `tibble` that has the attempt proportion by season. A binary indicator will be created for years in which Dan Campbell was active (2021 - 2025). To aid in convergence, the `season` predictor is scaled as well.
+
+```{r}
+season_scaled <- season_stats |>
+  group_by(season) |>
+  summarize(attempt_prop = sum(fourth_down_attempts) / sum(total_plays)) |>
+  mutate(dan_campbell = as.integer(season > 2020),
+         season = scale(season))
+```
+
+Since our response is continuous between 0 and 1, it makes sense to model the likelihood as a beta distribution. According to [Wikipedia](https://en.wikipedia.org/wiki/Beta_regression), modern beta regression is based on the parameterization of beta where $\alpha = \mu\phi$ and $\beta = (1 - \mu)\phi$. This means that the model will be of the following form:
+
+$$
+\begin{align}
+\text{attempt_prop}_t &\sim \text{Beta}(\mu_t\phi, (1 - \mu_t)\phi) \\
+\text{logit}(\mu_t) &= \beta_0 + \beta_1 \cdot \text{season} + \beta_2 \cdot \text{dan_campbell}
+\end{align}
+$$
+
+For this initial fit, let's keep the default priors that `brm` selects. We will investigate what was chosen after fitting the model. While this is not JAGS, we will follow a similar analysis pipeline that we have used in class.
+
+1.  Describe a Bayesian model
+2.  Run **M**arkov **C**hain **M**onte **C**arlo (MCMC) to get posterior distribution
+3.  Verify convergence via trace plots
+4.  Summarize posterior
+
+Let's start with Step 1 and translate what we described above to code interpretable by `brm` and STAN.
+
+```{r}
+fit1 <- brm(attempt_prop ~ .,
+            data = season_scaled, 
+            family = Beta(),
+            seed = 313)
+```
+
+It seems like the default in `brm` is 4 MCMC chains with 1,000 iterations of burn-in and another 1,000 iterations for sampling. Now let's move on to Step 2 and verify convergence.
+
+```{r}
+plot(fit1)
+```
+
+Since all four trace plots have the desired shape, we can verify that the MCMC algorithm has converged. Now we can go to the next step and summarize the posterior.
+
+```{r}
+fixef(fit1)
+```
+
+Both the coefficients for `season` and `dan_campbell` have positive means and 95 percent credible intervals, which is evidence that both of these predictors are associated with an increase in conversion attempts. Dan Campbell has a mean value that is large by nearly a factor of 4, suggesting that his presence in the league has created a notable shift in fourth-down decision-making.
+
+It is important to test the sensitivity of this analysis to prior information. Let's see what priors were selected by `brm`.
+
+```{r}
+fit1$prior
+```
+
+The two beta coefficients were given flat priors, or $\pi(\beta) \propto 1$. The intercept term is based on a $\text{t}_3(0, 2.5)$, which has not been directly discussed in class. The variance term, $\phi$, is modeled by an uninformative gamma distribution, which is similar to what I would have done manually.
+
+Let's refit the model with updated priors and see if there are significant differences. To start, $\beta_j \sim \text{Normal}(0, 10)$ for all $j$.
+
+```{r}
+# set priors
+priors <- c(set_prior("normal(0, 10)", class = c("b", "Intercept")))
+
+# fit model
+fit2 <- brm(attempt_prop ~ .,
+            data = season_scaled, 
+            family = Beta(),
+            prior = priors,
+            seed = 313)
+
+# view trace plots
+plot(fit2)
+```
+
+Convergence looks good, let's look at the posterior means.
+
+```{r}
+fixef(fit2)
+```
+
+These values look super similar to what was found with the `brm` defaults. Let's also adjust $\phi \sim \text{Gamma}(0.05, 0.05)$, making it more informative.
+
+```{r}
+# set priors
+priors <- c(set_prior("normal(0, 10)", class = c("b", "Intercept")) +
+            set_prior("gamma(0.05, 0.05)", class = "phi")
+            )
+
+# fit model
+fit3 <- brm(attempt_prop ~ .,
+            data = season_scaled, 
+            family = Beta(),
+            prior = priors,
+            seed = 313)
+
+# view trace plots
+plot(fit3)
+```
+
+Convergence looks good, let's see if the posterior means are any different.
+
+```{r}
+fixef(fit3)
+```
+
+With this updated prior, `season` is no longer significant since zero is contained in its 95 percent interval. The coefficient for `dan_campbell` is still associated with an increase in conversion attempt proportion, but the lower bound of its 95 percent credible interval has gotten closer to zero. The point estimates are pretty similar to what we have observed in the prior two fits. In general, we can say that the output is somewhat sensitive to the prior for $\phi$.
+
+To review, Dan Campbell is associated with an increase in fourth-down conversion attempt proportion in the NFL. Specifically, all else being equal, Dan Campbell is associated with approximately a 0.37 increase in the log-odds of conversion attempt proportion.
+
+## Situation Model
+
+Now that we have established that Dan Campbell has influenced NFL fourth-down decision-making, let's see what specific factors impact whether a team will go for it in a given situation. This series of models will be based on the play-by-play data, `pbp`, so there are significantly more predictors. For performance reasons, let's filter the `pbp` data to only include the last 10 seasons. We will also exclude columns we are not interested in at this point, and scale numeric columns for better convergence. To finish, let's print the columns to be used as predictors.
+
+```{r}
+# array of indicator cols
+indicator_cols <- c("home_team", "fourth_down_attempted")
+
+# scale pdp tibble
+pbp_scaled <- pbp |>
+ # filter(season > 2015) |>
+  select(!c(rush_attempt, pass_attempt, shotgun, no_huddle, fourth_down_converted)) |>
+    mutate(across(where(is.numeric) & -indicator_cols, scale))
+
+names(pbp_scaled)
+```
+
+Now we will fit a GLMM to model individual conversion attempt decisions. In the previous model, all effects were fixed, but this model will have fixed and random effects. The fixed effects will be the above listed predictors and modeled by the set $J$. There will be a random effect $\alpha_{tk}$ for each combination of $t$ season and $k$ team in sets $T$ and $K$, respectively. Like the previous one, this model will also be a logistic regression, but the formulation will be slightly different since the response is binary. Let $\text{pbp}$ correspond to the design matrix of `pdp`, then:
+
+$$
+\begin{align}
+\text{attempt}_t &\sim \text{Bernoulli}(p_i) \\
+\text{logit}(p_i) &= \beta_0 + \sum_{j \in J}\beta_j \cdot \text{pbp}_j + \sum_{t \in T}\sum_{k \in K}\alpha_{tk}
+\end{align}
+$$
+
+Again, we will start by fitting the model using the default priors that are determined by `brm`.
+
+```{r}
+fit4 <- brm(fourth_down_attempted ~ . - posteam - season_str + (1 | posteam:season_str),
+            data = pbp_scaled, 
+            family = bernoulli(link = "logit"), 
+            iter = 4000,
+            seed = 313)
+```
+
+```{r}
+plot(fit4)
+```
+
+```{r}
+ranef(fit4)$`posteam:season_str`[c("DET_2020", "DET_2021", "DET_2022", "DET_2023", "DET_2024", "DET_2025"), , "Intercept"]
+```
+
+```{r}
+ranef(fit4)
+```
+
+```{r}
+fit4$prior
+```
