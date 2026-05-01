@@ -1,5 +1,5 @@
 ---
-title: "The Dan Capbell Effect: Fourth-Down Decision-Making in the National Football League"
+title: "The Dan Campbell Effect: Fourth Down Decision-Making in the National Football League"
 format:
   html:
     theme: darkly
@@ -14,11 +14,11 @@ editor: visual
 
 ## Summary
 
-The purpose of this analysis is to determine the impact of Detroit Lions head coach Dan Campbell on fourth-down decision-making in the **N**ational **F**ootball **L**eague (NFL). In this document, we will specifically investigate the factors that increase a team's likelihood to attempt a fourth down conversion.
+The purpose of this analysis is to determine the impact of Detroit Lions head coach Dan Campbell on fourth down decision-making in the **N**ational **F**ootball **L**eague (NFL). In this document, we will answer this question and also investigate the factors that increase a team's likelihood to attempt a fourth down conversion.
 
-To start, let's import the required libraries. As always, the `tidyverse` load a host of tidy packages that are super helpful for data processing, such as `dplyr` and `ggplot2`. The `nflfastR` package will be utilized to pull in the data from `nflverse`, while `nflplotR` will add team logos and coloring to our figures.
+To start, let's import the required libraries. As always, the `tidyverse` package loads a host of tidy packages that are super helpful for data processing, such as `dplyr` and `ggplot2`. The `nflfastR` package will be utilized to pull in the data from [nflverse](https://nflfastr.com/index.html), while `nflplotR` will add team logos and coloring to our figures.
 
-The primary Bayesian modeling package used in this analysis is `brms`, which is based on STAN. This is a similar language to JAGS, but often runs faster. The `brms` package allows us to easily fit **G**eneralized **L**inear **M**ixed **M**odels (GLMMs) without writing STAN code, which is syntatically more difficult to understand than JAGS. This is a huge plus.
+The primary Bayesian modeling package used in this analysis is `brms`, which is based on STAN. This is a similar language to JAGS, but often runs faster. The `brms` package allows us to easily fit **G**eneralized **L**inear **M**ixed **M**odels (GLMMs) without writing STAN code, which has more complex syntax compared to JAGS. This is a huge plus, since we do not have to write STAN code, but get the performance benefits. That said, I did consult the [STAN](https://mc-stan.org/docs/) and [brms](https://paulbuerkner.com/brms/index.html) documentation to understand the necessary functions and syntax needed for effective model-building.
 
 ```{r}
 #install.packages(c("tidyverse", "brms", "nflfastR", "nflplotR"))
@@ -30,14 +30,14 @@ library(nflplotR)
 
 ## Data Processing
 
-Now let's use `nflfastR` to pull in the last 25 seasons of data. No filtering of rows or columns is allowed within this API call. This means that every play will be pulled in, including regular season and playoffs. Here are some filters we will need to apply:
+Now let's use `nflfastR` to pull in the last 25 seasons of data. No filtering of rows or columns is allowed within this API call. This means that every play will be pulled in, including regular season and playoffs. Here are some filters we will need to apply afterwards:
 
 -   Regular season only
 -   Fourth downs only
 -   Completed plays only
 -   Columns of interest only
 
-Let's go read in the data as a `tibble` filter the rows based on the above logic.
+Let's go ahead and read in the data as a `tibble` and cleanse it based on the above logic.
 
 ```{r}
 # array of last 25 seasons
@@ -53,17 +53,17 @@ dim_df <- as_tibble_row(
   )
 
 # determine cols of interest
-cols <- c("yardline_100", "half_seconds_remaining", 
-          "game_seconds_remaining", "qtr","ydstogo", 
-          "temp", "wind", "score_differential", "season", 
-          "spread_line", "goal_to_go", "home_team", 
-          "rush_attempt", "pass_attempt", "shotgun", 
-          "no_huddle", "fourth_down_attempted", 
-          "fourth_down_converted", "posteam", "season_str")
+cols <- c("week", "drive", "series", "yardline_100", 
+          "quarter_seconds_remaining", "half_seconds_remaining", 
+          "game_seconds_remaining", "qtr","ydstogo", "wp", "temp", 
+          "wind", "score_differential", "season", "start_time",
+          "spread_line", "goal_to_go", "home_team", "div_game",
+          "fourth_down_attempted",  "posteam", 
+          "season_str", "dan_campbell")
 
 # clean pbp tibble
 pbp <- pbp |>
-  # filter for completed fourth downs
+  # filter for completed fourth downs only
   filter(season_type == "REG",
          down == 4,
          play_type != "no_play",
@@ -72,12 +72,14 @@ pbp <- pbp |>
   # light feature engineering
   mutate(fourth_down_attempted = play,
          home_team = ifelse(posteam_type == "home", 1, 0),
+         start_time = as.integer(str_sub(start_time, -8, -7)),
          wind = replace_na(wind, 0),  # if indoors, default to 0 wind
          temp = replace_na(temp, 70), # if indoors, default to 70 degrees
          season_str = as.character(season),
+         dan_campbell = as.integer(season > 2020),
          across(where(is.character), trimws),) |>
   # select cols of interest
-  select(cols)
+  select(all_of(cols))
 
 # append new dims to tibble
 dim_df <- dim_df |> rbind(dim(pbp))
@@ -86,14 +88,12 @@ dim_df
 
 We see that we have considerably reduced the number of rows and columns from the original play-by-play data set. Keep in mind that a few of these variables are strings, such as `posteam`, and have dozens of different possible values. Depending on how the models are built, there could be even more predictors than we had originally.
 
-Finally, let's create a higher level `tibble` that groups
-
-the fourth down data by `season` and `team`.
+Finally, let's create a higher-level `tibble` that groups the fourth down data by `season` and `team`.
 
 ```{r}
 # get summary tibble by season and team
 season_stats <- pbp |>
-  group_by(season, posteam) |>
+  group_by(season, posteam, dan_campbell) |>
   summarize(total_plays = n(),
             fourth_down_attempts = sum(fourth_down_attempted),
             .groups = "drop") |>
@@ -103,7 +103,7 @@ season_stats <- pbp |>
 
 ## Exploratory Data Analysis
 
-Before getting into modeling, let's explore that data to see if there are any insights that can be gained. This includes predictions for what the statistical analysis might tell us. To start, let's plot the number of fourth-down attempts by NFL season.
+Before getting into modeling, let's explore that data to see if there are any insights that can be gained. This includes predictions for what the statistical analysis might tell us. To start, let's plot the number of fourth down attempts by NFL season.
 
 ```{r}
 # grouped season tibble
@@ -119,9 +119,9 @@ ggplot(aes(x = season, y = fourth_down_attempts)) +
        x = "Season", y = "Attempts")
 ```
 
-Prior to 2011, the conversion number of attempts were all over the place. From 2011 to 2021, there was an explosion in fourth-down attempts to the point that it looks almost exponential in growth. After that, the attempts seem to level off before increasing again in 2025. Of course, Dan Campbell debuted in 2021, but something else important happened: the NFL regular season expanded from 16 to 17 games. It is possible that the additional game creates more opportunities for fourth-down conversion attempts.
+Prior to 2011, the number of conversion attempts were all over the place. From 2011 to 2021, there was an explosion in fourth down attempts to the point that it looks almost exponential in growth. After that, the attempts seem to level off before increasing again in 2025.
 
-Let's instead look at the number of conversion attempts by the number of fourth down plays.
+Of course, Dan Campbell debuted as a full-time head coach in 2021, but something else important happened: the NFL regular season expanded from 16 to 17 games. It is possible that the additional game creates more opportunities for fourth down conversion attempts; let's instead look at the number of conversion attempts divided by the number of fourth downs.
 
 ```{r}
 # grouped season tibble
@@ -137,7 +137,7 @@ ggplot(aes(x = season, y = attempt_prop)) +
        x = "Season", y = "Proportion")
 ```
 
-This looks almost identical to the count-based plot, so it is safe to say that the extra game is not noticeably skewing the last 5 years of data. Now let's split out the Detroit Lions from the rest of the league and see if there is distinct visual difference.
+This looks almost identical to the count-based plot, so it is safe to say that the extra game is not noticeably skewing the last 25 years of data. Now let's split out the Detroit Lions from the rest of the league and see if there is distinct visual difference.
 
 ```{r}
 # grouped season and team tibble
@@ -158,13 +158,13 @@ Wow, the Lions experienced a significant jump starting in 2021 when Dan Campbell
 
 Let's now look at overall attempt proportion by team.
 
-```{r}
+```{r, fig.width = 12}
 # grouped season and team tibble
 season_stats |>
   group_by(posteam) |>
   summarize(attempt_prop = sum(fourth_down_attempts) / sum(total_plays)
             , .groups = "drop") |>
-# line plot of conversion proportion over time
+# col plot of conversion proportion by team
 ggplot(aes(x = reorder(posteam, attempt_prop, 
                        decreasing = TRUE), 
            y = attempt_prop, fill=posteam)) +
@@ -175,16 +175,16 @@ ggplot(aes(x = reorder(posteam, attempt_prop,
          subtitle = "Regular Seasons 2001 - 2025", x = "", y = "Proportion")
 ```
 
-Since 2001, the Lions have the second-highest proportion of fourth downs that are attempted as a conversion. even before Dan Campbell, they tended to take risks on fourth down. How does this change if we exclude the pre-Campbell era?
+Since 2001, the Lions have the second-highest proportion of fourth downs that are attempted as a conversion. Even before Dan Campbell, they tended to take risks on fourth down. How does this change if we exclude the pre-Campbell era?
 
-```{r}
+```{r, fig.width = 12}
 # grouped season and team tibble
 season_stats |>
   filter(season > 2020) |>
   group_by(posteam) |>
   summarize(attempt_prop = sum(fourth_down_attempts) / sum(total_plays)
             , .groups = "drop") |>
-# line plot of conversion proportion over time
+# col plot of conversion proportion by team
 ggplot(aes(x = reorder(posteam, attempt_prop, 
                        decreasing = TRUE), 
            y = attempt_prop, fill=posteam)) +
@@ -204,49 +204,63 @@ Now, we will begin the Bayesian modeling. Let's start by determining the impact 
 ```{r}
 season_scaled <- season_stats |>
   group_by(season) |>
-  summarize(attempt_prop = sum(fourth_down_attempts) / sum(total_plays)) |>
-  mutate(dan_campbell = as.integer(season > 2020),
-         season = scale(season))
+  summarize(attempt_prop = sum(fourth_down_attempts) / sum(total_plays),
+            dan_campbell = max(dan_campbell)) |>
+  mutate(season = scale(season))
 ```
 
 Since our response is continuous between 0 and 1, it makes sense to model the likelihood as a beta distribution. According to [Wikipedia](https://en.wikipedia.org/wiki/Beta_regression), modern beta regression is based on the parameterization of beta where $\alpha = \mu\phi$ and $\beta = (1 - \mu)\phi$. This means that the model will be of the following form:
 
 $$
 \begin{align}
-\text{attempt_prop}_t &\sim \text{Beta}(\mu_t\phi, (1 - \mu_t)\phi) \\
-\text{logit}(\mu_t) &= \beta_0 + \beta_1 \cdot \text{season} + \beta_2 \cdot \text{dan_campbell}
+\text{attempt_prop}_t & \sim \text{Beta}(\mu_t\phi, (1 - \mu_t)\phi) \\
+\text{logit}(\mu_t) & = \beta_0 + \beta_1 \cdot \text{season} + \beta_2 \cdot \text{dan_campbell}
 \end{align}
 $$
 
 For this initial fit, let's keep the default priors that `brm` selects. We will investigate what was chosen after fitting the model. While this is not JAGS, we will follow a similar analysis pipeline that we have used in class.
 
 1.  Describe a Bayesian model
-2.  Run **M**arkov **C**hain **M**onte **C**arlo (MCMC) to get posterior distribution
+2.  Run **M**arkov **C**hain **M**onte **C**arlo (MCMC) to get the posterior distribution
 3.  Verify convergence via trace plots
-4.  Summarize posterior
+4.  Summarize the posterior
 
 Let's start with Step 1 and translate what we described above to code interpretable by `brm` and STAN.
 
 ```{r}
-fit1 <- brm(attempt_prop ~ .,
-            data = season_scaled, 
-            family = Beta(),
-            seed = 313)
+# fit model once, then comment out for performance
+# fit1 <- brm(attempt_prop ~ .,
+#             data = season_scaled, 
+#             family = Beta(),
+#             seed = 313,
+#             file = "fit1.rds")
+
+# read in model fit from rds file
+fit1 <- readRDS("fits/fit1.rds")
 ```
 
-It seems like the default in `brm` is 4 MCMC chains with 1,000 iterations of burn-in and another 1,000 iterations for sampling. Now let's move on to Step 2 and verify convergence.
+It seems like the default in `brm` is 4 MCMC chains with 1,000 iterations of burn-in and another 1,000 iterations for sampling. Now let's move on to Step 3 and verify convergence.
 
 ```{r}
-plot(fit1)
+plot(fit1, ask = FALSE)
 ```
 
 Since all four trace plots have the desired shape, we can verify that the MCMC algorithm has converged. Now we can go to the next step and summarize the posterior.
 
 ```{r}
-fixef(fit1)
+# create tibble of fixed effect output
+fe1 <- as.data.frame(fixef(fit1)) |>
+  rownames_to_column("fixed_effect") |>
+  set_names("fixed_effect", "estimate", "error", "q2.5", "q97.5") |>
+  mutate(sig = as.integer(!(q2.5 * q97.5 <= 0))) |>
+  as_tibble()
+
+# show significant fixed effects
+fe1 |>
+ filter(sig > 0)
 ```
 
-Both the coefficients for `season` and `dan_campbell` have positive means and 95 percent credible intervals, which is evidence that both of these predictors are associated with an increase in conversion attempts. Dan Campbell has a mean value that is large by nearly a factor of 4, suggesting that his presence in the league has created a notable shift in fourth-down decision-making.
+Both the coefficients for `season` and `dan_campbell` have positive means and 95 percent credible intervals, which is evidence that both of these predictors are associated with an increase in conversion attempts. Dan Campbell has a mean value that is larger by nearly a factor of 4, suggesting that his presence in the league has created a notable shift in fourth down decision-making.
 
 It is important to test the sensitivity of this analysis to prior information. Let's see what priors were selected by `brm`.
 
@@ -256,27 +270,40 @@ fit1$prior
 
 The two beta coefficients were given flat priors, or $\pi(\beta) \propto 1$. The intercept term is based on a $\text{t}_3(0, 2.5)$, which has not been directly discussed in class. The variance term, $\phi$, is modeled by an uninformative gamma distribution, which is similar to what I would have done manually.
 
-Let's refit the model with updated priors and see if there are significant differences. To start, $\beta_j \sim \text{Normal}(0, 10)$ for all $j$.
+Let's refit the model with updated priors and see if there are significant differences. To start, $\beta_j \sim \text{Normal}(0, 10)$ for all $j \in J$, including the intercept term. This prior is most similar to frequentist ridge regression.
 
 ```{r}
 # set priors
 priors <- c(set_prior("normal(0, 10)", class = c("b", "Intercept")))
 
-# fit model
-fit2 <- brm(attempt_prop ~ .,
-            data = season_scaled, 
-            family = Beta(),
-            prior = priors,
-            seed = 313)
+# fit model once, then comment out for performance
+# fit2 <- brm(attempt_prop ~ .,
+#             data = season_scaled, 
+#             family = Beta(),
+#             prior = priors,
+#             seed = 313,
+#             file = "fits/fit2.rds")
+
+# read in model fit from rds file
+fit2 <- readRDS("fits/fit2.rds")
 
 # view trace plots
-plot(fit2)
+plot(fit2, ask = FALSE)
 ```
 
 Convergence looks good, let's look at the posterior means.
 
 ```{r}
-fixef(fit2)
+# create tibble of fixed effect output
+fe2 <- as.data.frame(fixef(fit2)) |>
+  rownames_to_column("fixed_effect") |>
+  set_names("fixed_effect", "estimate", "error", "q2.5", "q97.5") |>
+  mutate(sig = as.integer(!(q2.5 * q97.5 <= 0))) |>
+  as_tibble()
+
+# show significant fixed effects
+fe2 |>
+ filter(sig > 0)
 ```
 
 These values look super similar to what was found with the `brm` defaults. Let's also adjust $\phi \sim \text{Gamma}(0.05, 0.05)$, making it more informative.
@@ -287,41 +314,54 @@ priors <- c(set_prior("normal(0, 10)", class = c("b", "Intercept")) +
             set_prior("gamma(0.05, 0.05)", class = "phi")
             )
 
-# fit model
-fit3 <- brm(attempt_prop ~ .,
-            data = season_scaled, 
-            family = Beta(),
-            prior = priors,
-            seed = 313)
+# fit model once, then comment out for performance
+# fit3 <- brm(attempt_prop ~ .,
+#             data = season_scaled, 
+#             family = Beta(),
+#             prior = priors,
+#             seed = 313,
+#             file = "fits/fit3.rds")
+
+# read in model fit from rds file
+fit3 <- readRDS("fits/fit3.rds")
 
 # view trace plots
-plot(fit3)
+plot(fit3, ask = FALSE)
 ```
 
 Convergence looks good, let's see if the posterior means are any different.
 
 ```{r}
-fixef(fit3)
+# create tibble of fixed effect output
+fe3 <- as.data.frame(fixef(fit3)) |>
+  rownames_to_column("fixed_effect") |>
+  set_names("fixed_effect", "estimate", "error", "q2.5", "q97.5") |>
+  mutate(sig = as.integer(!(q2.5 * q97.5 <= 0))) |>
+  as_tibble()
+
+# show significant fixed effects
+fe3 |>
+ filter(sig > 0)
 ```
 
 With this updated prior, `season` is no longer significant since zero is contained in its 95 percent interval. The coefficient for `dan_campbell` is still associated with an increase in conversion attempt proportion, but the lower bound of its 95 percent credible interval has gotten closer to zero. The point estimates are pretty similar to what we have observed in the prior two fits. In general, we can say that the output is somewhat sensitive to the prior for $\phi$.
 
-To review, Dan Campbell is associated with an increase in fourth-down conversion attempt proportion in the NFL. Specifically, all else being equal, Dan Campbell is associated with approximately a 0.37 increase in the log-odds of conversion attempt proportion.
+To review, Dan Campbell is associated with an increase in fourth down conversion attempt proportion in the NFL. Specifically, all else being equal, Dan Campbell is associated with approximately a 0.37 increase in the log-odds of conversion attempt proportion.
 
 ## Situation Model
 
-Now that we have established that Dan Campbell has influenced NFL fourth-down decision-making, let's see what specific factors impact whether a team will go for it in a given situation. This series of models will be based on the play-by-play data, `pbp`, so there are significantly more predictors. For performance reasons, let's filter the `pbp` data to only include the last 10 seasons. We will also exclude columns we are not interested in at this point, and scale numeric columns for better convergence. To finish, let's print the columns to be used as predictors.
+Now that we have established that Dan Campbell has influenced NFL fourthdown decision-making in some way, let's see what specific factors impact whether a team will go for it in a given situation. This series of models will be based on the play-by-play data, `pbp`, so there are significantly more predictors. For performance reasons, let's filter the `pbp` data to only include the last 10 seasons. We will also scale numeric columns for better convergence. To finish, let's print the columns to be used as predictors.
 
 ```{r}
 # array of indicator cols
-indicator_cols <- c("home_team", "fourth_down_attempted")
+indicator_cols <- c("home_team", "fourth_down_attempted", "div_game", "dan_campbell")
 
 # scale pdp tibble
 pbp_scaled <- pbp |>
- # filter(season > 2015) |>
-  select(!c(rush_attempt, pass_attempt, shotgun, no_huddle, fourth_down_converted)) |>
-    mutate(across(where(is.numeric) & -indicator_cols, scale))
-
+  filter(season > 2015) |>
+    mutate(across(where(is.numeric) & -all_of(indicator_cols), 
+                  ~ as.numeric(scale(.x))))
+# print predictors
 names(pbp_scaled)
 ```
 
@@ -334,28 +374,414 @@ $$
 \end{align}
 $$
 
-Again, we will start by fitting the model using the default priors that are determined by `brm`.
+For now, let's exclude `dan_campbell` as a predictor since his impact should already be backed into the random effects. Again, we will start by fitting the model using the default priors that are determined by `brm`.
 
 ```{r}
-fit4 <- brm(fourth_down_attempted ~ . - posteam - season_str + (1 | posteam:season_str),
-            data = pbp_scaled, 
-            family = bernoulli(link = "logit"), 
-            iter = 4000,
-            seed = 313)
+# fit model once, then comment out for performance
+# fit4 <- brm(fourth_down_attempted ~ . - 
+#               posteam - season_str  - dan_campbell + 
+#               (1 | posteam:season_str),
+#             data = pbp_scaled, 
+#             family = bernoulli(link = "logit"), 
+#             seed = 313,
+#             file = "fits/fit4.rds")
+
+# read in model fit from rds file
+fit4 <- readRDS("fits/fit4.rds")
 ```
 
-```{r}
-plot(fit4)
-```
+Let's now analyze the trace plots.
 
 ```{r}
-ranef(fit4)$`posteam:season_str`[c("DET_2020", "DET_2021", "DET_2022", "DET_2023", "DET_2024", "DET_2025"), , "Intercept"]
+plot(fit4, ask = FALSE)
 ```
 
-```{r}
-ranef(fit4)
-```
+Trace plots look ideal for all fixed and random effects, so the MCMC algorithm has converged. Now let's summarize the posterior, starting with the fixed effects.
 
 ```{r}
-fit4$prior
+# create tibble of fixed effect output
+fe4 <- as.data.frame(fixef(fit4)) |>
+  rownames_to_column("fixed_effect") |>
+  set_names("fixed_effect", "estimate", "error", "q2.5", "q97.5") |>
+  mutate(sig = as.integer(!(q2.5 * q97.5 <= 0))) |>
+  as_tibble()
+
+# show significant fixed effects
+fe4 |>
+ filter(sig > 0)
 ```
+
+The following variables have a positive relationship with the likelihood of a conversion attempt:
+
+-   `week`
+-   `series`
+-   `quarter_seconds_remaining`
+-   `score_differential`
+-   `season`
+-   `home_team`
+
+Some of these relationships are intuitive to grasp. The home team is likely more aggressive since they home field generally creates an advantage, teams on the playoff bubble become desperate later in the NFL season, and teams might want to continue a longer drive rather than punt it away. There are also some regressors that are not significant by 95 percent credible interval and include:
+
+-   `drive`
+-   `wind`
+-   `start_time`
+-   `spread_line`
+-   `div_game`
+
+Some of these are situational, like if a team is playing a division rival, but things like wind I would have guessed were a factor in the decision-making calculus. All other covariates are negatively related to conversion attempt likelihood. This includes things like `yardline_100` and `wp`. Of course, the closer a team is to to their own end zone, they are less likely to attempt a fourth down conversion because the risk of the other team scoring points is too great. Additionally, if a team is expected to win they have little incentive to take gambles, while teams with a low win probability must accept some risk.
+
+Let's turn our attention to the random effects. As a reminder, these consider the combined effect of a team in a given season. The rational here is that team strategy often changes from year-to-year due to league trends and coaching and personnel changes.
+
+```{r}
+# create tibble of random effect output
+re4 <- as.data.frame(ranef(fit4)) |>
+  rownames_to_column("random_effect") |>
+  set_names("random_effect", "estimate", "error", "q2.5", "q97.5") |>
+  mutate(sig = as.integer(!(q2.5 * q97.5 <= 0))) |>
+  as_tibble()
+
+# filter for detroit data only
+re4 |>
+  filter(str_detect(random_effect, "DET"))
+```
+
+Looking at the Detroit Lions specifically, it appears that only the 2023 and 2024 seasons have a clear positive impact on conversion attempt. It should be noted that the posterior mean jumps considerably starting in 2021, and the 95 percent intervals for 2021 and 2022 have lower bounds that a very nearly zero. It seems plausible that Dan Campbell's impact on fourth down decision-making heavily impacted the Lions since he took over head coaching responsibilities.
+
+Since there are 320 random effects, let's now look at a ranking of the top 10 significant posterior means in terms of their magnitude by team and year.
+
+```{r}
+# filter for top 10 significant posterior means
+re4 |>
+  filter(sig > 0) |>
+  arrange(desc(estimate)) |>
+  head(10)
+```
+
+Detroit has two of the top ten spots, including number one overall. Over half of these values are post-Dan Campbell. Notably, all of these random effects are significant by 95 percent credible interval, so these specific team and year impacts are relevant to describing conversion attempts.
+
+At this point, it might make more sense to adjust the random effect to be for each team and the indicator for `dan_campbell`. Having fewer random effects will create a few benefits:
+
+1.  Improved performance due to faster MCMC iterations
+2.  Easier interpretability since there are only 64 random effects instead of 320
+3.  Clear before vs after comparisons with respect to Dan Campbell
+
+The model will use the same default priors and likelihood. The only adjustment will be the random effect term:
+
+$$
+\begin{align}
+\text{attempt}_t &\sim \text{Bernoulli}(p_i) \\
+\text{logit}(p_i) &= \beta_0 + \sum_{j \in J}\beta_j \cdot \text{pbp}_j + \sum_{d \in D}\sum_{k \in K}\alpha_{dk}
+\end{align}
+$$
+
+Where $d \in D= \{0, 1\}$ is an indicator if Dan Campbell is a full-time head coach in the league or not. Let's run this updated model.
+
+```{r}
+# fit model once, then comment out for performance
+# fit5 <- brm(fourth_down_attempted ~ . - 
+#               posteam - season_str - dan_campbell + 
+#               (1 | posteam:dan_campbell),
+#             data = pbp_scaled, 
+#             family = bernoulli(link = "logit"),
+#             seed = 313,
+#             file = "fits/fit5.rds")
+
+# read in model fit from rds file
+fit5 <- readRDS("fits/fit5.rds")
+
+# view trace plots
+plot(fit5, ask = FALSE)
+```
+
+Convergence looks good, let's investigate the fixed effects.
+
+```{r}
+# create tibble of fixed effect output
+fe5 <- as.data.frame(fixef(fit5)) |>
+  rownames_to_column("fixed_effect") |>
+  set_names("fixed_effect", "estimate", "error", "q2.5", "q97.5") |>
+  mutate(sig = as.integer(!(q2.5 * q97.5 <= 0))) |>
+  as_tibble()
+
+# show significant fixed effects
+fe5 |>
+ filter(sig > 0)
+```
+
+It seems like the same covariates are significant with the same directionality, so let's turn our attention to the random effects.
+
+```{r}
+# create tibble of random effect output
+re5 <- as.data.frame(ranef(fit5)) |>
+  rownames_to_column("random_effect") |>
+  set_names("random_effect", "estimate", "error", "q2.5", "q97.5") |>
+  mutate(sig = as.integer(!(q2.5 * q97.5 <= 0))) |>
+  as_tibble()
+
+# show significant random effects
+re5 |>
+  filter(sig > 0)
+```
+
+```{r, fig.width = 12}
+# grouped team tibble of random effect deltas
+re5 |>
+  mutate(team = str_replace(str_sub(random_effect, 1, 3), "_", ""),
+  dan_campbell = str_sub(random_effect, -1, -1),
+  pre = ifelse(dan_campbell == 0, estimate, Inf),
+  post = ifelse(dan_campbell == 1, estimate, Inf)) |>
+  group_by(team) |>
+  summarize(post_delta = min(post) - min(pre)) |>
+  arrange(desc(post_delta)) |>
+  # col plot of posterior mean delta
+  ggplot(aes(x = reorder(team, post_delta, 
+                       decreasing = TRUE), 
+             y = post_delta, fill=team)) +
+  geom_col() +
+  scale_fill_nfl(alpha = 0.8) +
+  theme(axis.text.x.bottom = element_nfl_logo(size = 1)) +
+    labs(title = "The Dan Campbell Effect", 
+         subtitle = "Posterior Random Effect Mean Delta by Team", 
+         x = "", y = "Delta")
+```
+
+Based on this plot, the Detroit Lions experienced by far the largest increase in the posterior mean after Dan Campbell joined the league. This might have been obvious because he is the head coach of the Lions, so he has the most direct impact over that team's decision-making. Still, about half of the teams in the league have experienced an increase in the random effect starting in 2021. That means that about half of the league experienced a potential decrease in fourth down conversion attempts after Dan Campbell. This suggests that Campbell's impact on the league might not be ubiquitous.
+
+Let's see what the priors selected by `brm` were.
+
+```{r}
+fit5$prior
+```
+
+Again, we see flat priors for the covariates and a t-distribution for the intercepts and standard deviations. Let's rerun the model with univariate Gaussian priors for all beta coefficients (including the intercept) and an uninformatiev gamma for the standard deviation of the random effect.
+
+$$
+\begin{align}
+\pi(\beta_j) &\sim \text{Normal}(0, 10) \\
+\pi(\sigma) &\sim \text{Gamma}(0.01, 0.01) \\
+\end{align}
+$$
+
+Again, this is essentially ridge regression. This is what I would have defaulted to if running in JAGS.
+
+```{r}
+# set priors
+priors <- c(set_prior("normal(0, 10)", class = c("b", "Intercept")) +
+            set_prior("gamma(0.05, 0.05)", class = "sd")
+            )
+
+# fit model once, them comment out for performance
+# fit6 <- brm(fourth_down_attempted ~ . - 
+#               posteam - season_str - dan_campbell + 
+#               (1 | posteam:dan_campbell),
+#             data = pbp_scaled, 
+#             family = bernoulli(link = "logit"),
+#             prior = priors,
+#             seed = 313,
+#             file = "fits/fit6.rds")
+
+# read in model fit from rds file
+fit6 <- readRDS("fits/fit6.rds")
+
+# view trace plots
+plot(fit6, ask = FALSE)
+```
+
+Looks like this is all converged, so let's investigate the fixed effects.
+
+```{r}
+# create tibble of fixed effect output
+fe6 <- as.data.frame(fixef(fit6)) |>
+  rownames_to_column("fixed_effect") |>
+  set_names("fixed_effect", "estimate", "error", "q2.5", "q97.5") |>
+  mutate(sig = as.integer(!(q2.5 * q97.5 <= 0))) |>
+  as_tibble()
+
+# show significant fixed effects
+fe6 |>
+ filter(sig > 0)
+```
+
+Again, these looks really similar to what we have seen before. Let's now look at the significant random effects.
+
+```{r}
+# create tibble of random effect output
+re6 <- as.data.frame(ranef(fit6)) |>
+  rownames_to_column("random_effect") |>
+  set_names("random_effect", "estimate", "error", "q2.5", "q97.5") |>
+  mutate(sig = as.integer(!(q2.5 * q97.5 <= 0))) |>
+  as_tibble()
+
+# show significant random effects
+re6 |>
+  filter(sig > 0) |>
+  arrange(desc(estimate))
+```
+
+No surprise, Detroit post-Dan Campbell is at the top of the list. It also looks like Buffalo, Cleveland, Carolina, and Arizona also experienced an uptick in fourth down attempts corresponding to Dan Campbell.
+
+Let's plot the pre- and post-Campbell differences in the posterior mean between the random effects for all teams like we did previously.
+
+```{r, fig.width = 12}
+# grouped team tibble of random effect deltas
+re6 |>
+  mutate(team = str_replace(str_sub(random_effect, 1, 3), "_", ""),
+  dan_campbell = str_sub(random_effect, -1, -1),
+  pre = ifelse(dan_campbell == 0, estimate, Inf),
+  post = ifelse(dan_campbell == 1, estimate, Inf)) |>
+  group_by(team) |>
+  summarize(post_delta = min(post) - min(pre)) |>
+  arrange(desc(post_delta)) |>
+  # col plot of posterior mean delta
+  ggplot(aes(x = reorder(team, post_delta, 
+                       decreasing = TRUE), 
+             y = post_delta, fill=team)) +
+  geom_col() +
+  scale_fill_nfl(alpha = 0.8) +
+  theme(axis.text.x.bottom = element_nfl_logo(size = 1)) +
+    labs(title = "The Dan Campbell Effect", 
+         subtitle = "Posterior Random Effect Mean Delta by Team", 
+         x = "", y = "Delta")
+```
+
+This looks really similar to what we observed before. Let's try running this model with a shrinkage prior, specifically a $\text{Horseshoe}(1, 1)$ on the fixed effects. This might help reduce some of the significant covariates in our model.
+
+```{r}
+# set priors
+priors <- c(prior(normal(0, 10), class = "Intercept"),
+            prior(gamma(0.01, 0.01), class = "sd"),
+            prior(horseshoe(), class ="b")
+            )
+
+# fit model once, then comment out for performance
+# fit7 <- brm(fourth_down_attempted ~ . - 
+#               posteam - season_str - dan_campbell + 
+#               (1 | posteam:dan_campbell),
+#             data = pbp_scaled, 
+#             family = bernoulli(link = "logit"),
+#             prior = priors,
+#             seed = 313,
+#             file = "fits/fit7.rds")
+
+# read in model fit from rds file
+fit7 <- readRDS("fits/fit7.rds")
+
+# view trace plots
+plot(fit7, ask = FALSE)
+```
+
+Again, converge is verified. Let's see how this change has impacted the fixed effects.
+
+```{r}
+fe7 <- as.data.frame(fixef(fit7)) |>
+  rownames_to_column("fixed_effect") |>
+  set_names("fixed_effect", "estimate", "error", "q2.5", "q97.5") |>
+  mutate(sig = as.integer(!(q2.5 * q97.5 <= 0))) |>
+  as_tibble()
+
+# show significant fixed effects
+fe7 |>
+ filter(sig > 0)
+```
+
+The biggest change is that `quarter_seconds_remaining` is no longer significant, which makes sense as `qtr`, `half_seconds_remaining`, and `game_seconds_remaining` are all significant and encode this information. Otherwise, the rest are still significant but are ever so slightly shrunk towards zero.
+
+Now let's see if this update has impacted any of the random effects.
+
+```{r}
+# create tibble of random effect output
+re7 <- as.data.frame(ranef(fit7)) |>
+  rownames_to_column("random_effect") |>
+  set_names("random_effect", "estimate", "error", "q2.5", "q97.5") |>
+  mutate(sig = as.integer(!(q2.5 * q97.5 <= 0))) |>
+  as_tibble()
+
+# show significant random effects
+re7 |>
+  filter(sig > 0) |>
+  arrange(desc(estimate))
+```
+
+Tennessee before Dan Campbell is no longer a significant random effect, but otherwise these are pretty similar to the previous two model runs.
+
+Let's plot the change in posterior mean between the two time periods for the random effects.
+
+```{r, fig.width = 12}
+# grouped team tibble of random effect deltas
+re7 |>
+  mutate(team = str_replace(str_sub(random_effect, 1, 3), "_", ""),
+  dan_campbell = str_sub(random_effect, -1, -1),
+  pre = ifelse(dan_campbell == 0, estimate, Inf),
+  post = ifelse(dan_campbell == 1, estimate, Inf)) |>
+  group_by(team) |>
+  summarize(post_delta = min(post) - min(pre)) |>
+  arrange(desc(post_delta)) |>
+  # col plot of posterior mean delta
+  ggplot(aes(x = reorder(team, post_delta, 
+                       decreasing = TRUE), 
+             y = post_delta, fill=team)) +
+  geom_col() +
+  scale_fill_nfl(alpha = 0.8) +
+  theme(axis.text.x.bottom = element_nfl_logo(size = 1)) +
+    labs(title = "The Dan Campbell Effect", 
+         subtitle = "Posterior Random Effect Mean Delta by Team", 
+         x = "", y = "Delta")
+```
+
+This looks identical to the previous plot.
+
+### Conclusion
+
+To conclude, let's plot the fixed effects and review which are significant for the final model we ran, `fit7`.
+
+```{r, fig.width = 12}
+# lions team colors
+hblue <-"#0076B6"
+silver <- "#B0B7BC"
+
+# remove intercept from tibble
+fe7 |>
+  filter(fixed_effect != "Intercept") |>
+  # error bar plot of credible interval
+  ggplot(aes(x = reorder(fixed_effect, estimate), 
+             y = estimate, color = factor(sig))) +
+  geom_point(aes(color = factor(sig))) +
+  geom_errorbar(aes(ymin = q2.5, ymax = q97.5)) +
+  scale_color_manual(name = "Significant", 
+                    values = c("0" = silver, "1" = hblue)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Fixed Effects Posterior Means",
+     x = "Fixed Effect", y = "95% Credible Interval")
+```
+
+In general, a lot of the classic fourth down strategy is at play here. The less yards needed to pick up a first down, the more likely a team is to attempt to convert. If a team is further away from the opponent's end zone, they are also unlikely to attempt a conversion; however, if the team is inside their opponent's 10 yard line, they are actually more likely to kick a field goal. These two effects offset somewhat. Towards the end of a game, teams tend to become more aggressive if they need to score points.
+
+In contrast, the series number of a given drive is actually most predictive of a potential conversion attempt. This is likely because larger series numbers are usually closer to the opponent's end of the field, thus making the fourth down safer. As noted previously, things like `season`, `home_team`, and `week` also increase the likelihood of a fourth down try.
+
+Now let's look at the difference between the random effect with Dan Campbell and without for each team.
+
+```{r, fig.width = 12}
+# grouped team tibble of random effect deltas
+re7 |>
+  mutate(team = str_replace(str_sub(random_effect, 1, 3), "_", ""),
+  dan_campbell = str_sub(random_effect, -1, -1),
+  pre = ifelse(dan_campbell == 0, estimate, Inf),
+  post = ifelse(dan_campbell == 1, estimate, Inf)) |>
+  group_by(team) |>
+  summarize(post_delta = min(post) - min(pre),
+            sig = max(sig)) |>
+  arrange(desc(post_delta)) |>
+  # col plot of posterior mean delta
+  ggplot(aes(x = reorder(team, post_delta, 
+                       decreasing = TRUE), 
+             y = post_delta, fill=factor(sig))) +
+  geom_col(alpha=0.8) +
+  scale_fill_manual(name = "Significant", 
+                    values = c("0" = "#B0B7BC", "1" = "#0076B6")) +
+  theme(axis.text.x.bottom = element_nfl_logo(size = 1)) +
+    labs(title = "The Dan Campbell Effect", 
+         subtitle = "Posterior Random Effects Mean Delta by Team", 
+         x = "", y = "Delta")
+```
+
+While there is evidence that Dan Campbell's fourth down strategy has spread to five teams other than the Lions, about half of the league has seen an increase in fourth down conversion attempts after he joined the Lions. There are six teams that are actually less likely to attempt a fourth down since 2021. These teams all have one thing in common: they typically have elite defenses each season. A strong defense means punting the ball or taking the field goal can be advantageous since it is less likely the other team will score.

@@ -1,4 +1,4 @@
-# The Dan Campbell Effect: Fourth-Down Decision-Making in the National Football League
+# The Dan Campbell Effect: Fourth Down Decision-Making in the National Football League
 
 > **Note:** This repo is related to my final project for *ST 540: Applied Bayesian Analysis* at NC State University.
 
@@ -8,4 +8,4 @@ This project concerns analyzing play-by-play data queried from NFL databases usi
 
 ## Data
 
-The data examined is from the last 10 NFL regular seasons, 2016-2017 through 2024-2025. Due to the nature of this analysis, the play-by-play data is limited to fourth-down attempts only.
+The data examined is from the last 25 NFL regular seasons, 2001-2002 through 2024-2025. Due to the nature of this analysis, the play-by-play data is limited to fourth-down attempts only.
